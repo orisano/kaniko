@@ -41,11 +41,13 @@ import (
 
 var (
 	// RetrieveRemoteImage downloads an image from a remote location
+	// fake!!!!!! remoteImage is lazy loading
 	RetrieveRemoteImage = remoteImage
 	retrieveTarImage    = tarballImage
 )
 
 // RetrieveSourceImage returns the base image of the stage at index
+// ローカルにあるベースイメージ(他ステージくらいしか基本はない), CacheDir以下のイメージ, 最後はRemoteImage
 func RetrieveSourceImage(stage config.KanikoStage, opts *config.KanikoOptions) (v1.Image, error) {
 	t := timing.Start("Retrieving Source Image")
 	defer timing.DefaultRun.Stop(t)
@@ -87,14 +89,15 @@ func RetrieveSourceImage(stage config.KanikoStage, opts *config.KanikoOptions) (
 	return RetrieveRemoteImage(currentBaseName, opts)
 }
 
+// tarを読み出してImageとして扱えるようにする
 func tarballImage(index int) (v1.Image, error) {
 	tarPath := filepath.Join(constants.KanikoIntermediateStagesDir, strconv.Itoa(index))
 	logrus.Infof("Base image from previous stage %d found, using saved tar at path %s", index, tarPath)
 	return tarball.ImageFromPath(tarPath, nil)
 }
 
+// 遅延評価で解決できるImageを返す
 func remoteImage(image string, opts *config.KanikoOptions) (v1.Image, error) {
-	logrus.Infof("Downloading base image %s", image)
 	ref, err := name.ParseReference(image, name.WeakValidation)
 	if err != nil {
 		return nil, err
@@ -126,6 +129,7 @@ func remoteImage(image string, opts *config.KanikoOptions) (v1.Image, error) {
 	return remote.Image(ref, remote.WithTransport(tr), remote.WithAuthFromKeychain(creds.GetKeychain()))
 }
 
+
 func cachedImage(opts *config.KanikoOptions, image string) (v1.Image, error) {
 	ref, err := name.ParseReference(image, name.WeakValidation)
 	if err != nil {
@@ -141,6 +145,7 @@ func cachedImage(opts *config.KanikoOptions, image string) (v1.Image, error) {
 			return nil, err
 		}
 
+		// マニフェストのdownloadだけが行われる
 		d, err := img.Digest()
 		if err != nil {
 			return nil, err

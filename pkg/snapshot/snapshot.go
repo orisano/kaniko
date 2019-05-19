@@ -80,7 +80,7 @@ func (s *Snapshotter) TakeSnapshot(files []string) (string, error) {
 	// Add files to the layered map
 	for _, file := range filesToAdd {
 		if err := s.l.Add(file); err != nil {
-			return "", fmt.Errorf("Unable to add file %s to layered map: %s", file, err)
+			return "", fmt.Errorf("unable to add file %s to layered map: %s", file, err)
 		}
 	}
 
@@ -94,6 +94,7 @@ func (s *Snapshotter) TakeSnapshot(files []string) (string, error) {
 
 // TakeSnapshotFS takes a snapshot of the filesystem, avoiding directories in the whitelist, and creates
 // a tarball of the changed files.
+// / からfull scanして差分をtarに書く
 func (s *Snapshotter) TakeSnapshotFS() (string, error) {
 	f, err := ioutil.TempFile(snapshotPathPrefix, "")
 	if err != nil {
@@ -103,11 +104,13 @@ func (s *Snapshotter) TakeSnapshotFS() (string, error) {
 	t := util.NewTar(f)
 	defer t.Close()
 
+	// / からscanして差分を検知する
 	filesToAdd, filesToWhiteOut, err := s.scanFullFilesystem()
 	if err != nil {
 		return "", err
 	}
 
+	// tarに書き込む. WhiteOutは.whで書き込む
 	if err := writeToTar(t, filesToAdd, filesToWhiteOut); err != nil {
 		return "", err
 	}
@@ -122,16 +125,21 @@ func (s *Snapshotter) scanFullFilesystem() ([]string, []string, error) {
 	// for example the hashing function that determines if files are equal uses the mtime of the files,
 	// which can lag if sync is not called. Unfortunately there can still be lag if too much data needs
 	// to be flushed or the disk does its own caching/buffering.
-	syscall.Sync()
+	_ = syscall.Sync()
 
+	// s.directoryは"/", root
+	// whiteoutsとlayersの末尾に新しいmapを追加する
 	s.l.Snapshot()
 
 	timer := timing.Start("Walking filesystem")
-	// Save the fs state in a map to iterate over later.
+	// /からすべてのパスを一旦メモリに保持する
 	memFs := map[string]*godirwalk.Dirent{}
-	godirwalk.Walk(s.directory, &godirwalk.Options{
+	_ = godirwalk.Walk(s.directory, &godirwalk.Options{
 		Callback: func(path string, ent *godirwalk.Dirent) error {
+			// /proc/self/mountinfoとVOLUMEコマンドで指定されたパス以下にないか確認する
+			// /kaniko, /var/run, /etc/mtab 以下もダメ
 			if util.IsInWhitelist(path) {
+				// IsDir, 存在しない場合はpathの末尾が/かどうか
 				if util.IsDestDir(path) {
 					logrus.Debugf("Skipping paths under %s, as it is a whitelisted directory", path)
 					return filepath.SkipDir
@@ -146,10 +154,16 @@ func (s *Snapshotter) scanFullFilesystem() ([]string, []string, error) {
 	)
 	timing.DefaultRun.Stop(timer)
 
-	// First handle whiteouts
-	//   Get a list of all the files that existed before this layer
+	// imageファイルの展開 -> layeredMapに追加の流れを踏むので
+	// imageファイルの展開しか行われてない状態でここに来る
+	// 実際のFSであるmemFsとメモリ上の状態であるイメージの展開前のlayeredMapの差分は
+	// layeredMap - memFs は 今回削除されるだろう領域
+
+	// s.lにはこれまでのlayerが全て保持されている.
+	// whiteoutファイルを考慮したファイル群を取得する
 	existingPaths := s.l.getFlattenedPathsForWhiteOut()
-	//   Find the delta by removing everything left in this layer.
+
+	// 実際のディレクトリ上にあるファイルを全て取り除く
 	for p := range memFs {
 		delete(existingPaths, p)
 	}
@@ -159,6 +173,8 @@ func (s *Snapshotter) scanFullFilesystem() ([]string, []string, error) {
 		// Only add the whiteout if the directory for the file still exists.
 		dir := filepath.Dir(path)
 		if _, ok := memFs[dir]; ok {
+			// これまでのwhiteoutsに登録されているか確認して登録されていなければ追加する
+			// 追加したときにtrueを返す
 			if s.l.MaybeAddWhiteout(path) {
 				logrus.Infof("Adding whiteout for %s", path)
 				filesToWhiteOut = append(filesToWhiteOut, path)
@@ -173,6 +189,7 @@ func (s *Snapshotter) scanFullFilesystem() ([]string, []string, error) {
 			continue
 		}
 		// Only add changed files.
+		// すべてのファイルのhashをとったりするのか..., なるほどmtimeのみのモードが理解できる
 		fileChanged, err := s.l.CheckFileChange(path)
 		if err != nil {
 			return nil, nil, err
@@ -184,12 +201,14 @@ func (s *Snapshotter) scanFullFilesystem() ([]string, []string, error) {
 	}
 
 	// Also add parent directories to keep the permission of them correctly.
+	// なんか追加予定のファイルの上位ディレクトリすべて
 	filesToAdd = filesWithParentDirs(filesToAdd)
 
 	// Add files to the layered map
 	for _, file := range filesToAdd {
+		// ここで初めてメモリ上の状態が更新される
 		if err := s.l.Add(file); err != nil {
-			return nil, nil, fmt.Errorf("Unable to add file %s to layered map: %s", file, err)
+			return nil, nil, fmt.Errorf("unable to add file %s to layered map: %s", file, err)
 		}
 	}
 

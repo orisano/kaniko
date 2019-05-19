@@ -46,6 +46,7 @@ type RegistryCache struct {
 }
 
 // RetrieveLayer retrieves a layer from the cache given the cache key ck.
+// ちなみにこれもdownloadは行わない
 func (rc *RegistryCache) RetrieveLayer(ck string) (v1.Image, error) {
 	cache, err := Destination(rc.Opts, ck)
 	if err != nil {

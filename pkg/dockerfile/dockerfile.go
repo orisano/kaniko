@@ -73,7 +73,7 @@ func Stages(opts *config.KanikoOptions) ([]config.KanikoStage, error) {
 		kanikoStages = append(kanikoStages, config.KanikoStage{
 			Stage:                  stage,
 			BaseImageIndex:         baseImageIndex(index, stages),
-			BaseImageStoredLocally: (baseImageIndex(index, stages) != -1),
+			BaseImageStoredLocally: baseImageIndex(index, stages) != -1,
 			SaveStage:              saveStage(index, stages),
 			Final:                  index == targetStage,
 			MetaArgs:               metaArgs,

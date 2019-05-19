@@ -67,24 +67,30 @@ type stageBuilder struct {
 
 // newStageBuilder returns a new type stageBuilder which contains all the information required to build the stage
 func newStageBuilder(opts *config.KanikoOptions, stage config.KanikoStage, crossStageDeps map[int][]string) (*stageBuilder, error) {
+	// ここではdownloadしない, ローカルにあれば解決する
 	sourceImage, err := util.RetrieveSourceImage(stage, opts)
 	if err != nil {
 		return nil, err
 	}
 
+	// manifestだけdownloadする
 	imageConfig, err := initializeConfig(sourceImage)
 	if err != nil {
 		return nil, err
 	}
 
+	// 実行するコマンドの後に先に追加する
 	if err := resolveOnBuild(&stage, &imageConfig.Config); err != nil {
 		return nil, err
 	}
 
+	// time, fullでfullが厳密なやつ
 	hasher, err := getHasher(opts.SnapshotMode)
 	if err != nil {
 		return nil, err
 	}
+
+	// mapの配列みたいなもの
 	l := snapshot.NewLayeredMap(hasher, util.CacheHasher())
 	snapshotter := snapshot.NewSnapshotter(l, constants.RootDir)
 
@@ -103,6 +109,7 @@ func newStageBuilder(opts *config.KanikoOptions, stage config.KanikoStage, cross
 	}
 
 	for _, cmd := range s.stage.Commands {
+		// Docker標準のコマンドからkanikoが用意したコマンドに読み替え
 		command, err := commands.GetCommand(cmd, opts.SrcContext)
 		if err != nil {
 			return nil, err
@@ -130,6 +137,7 @@ func initializeConfig(img partial.WithConfigFile) (*v1.ConfigFile, error) {
 	return imageConfig, nil
 }
 
+// COPYとADDの転送対象群からcache可能なRUNを求めてRUNの中身をファイルコピーに置き換える
 func (s *stageBuilder) optimize(compositeKey CompositeCache, cfg v1.Config) error {
 	if !s.opts.Cache {
 		return nil
@@ -147,23 +155,29 @@ func (s *stageBuilder) optimize(compositeKey CompositeCache, cfg v1.Config) erro
 		if command == nil {
 			continue
 		}
+
 		compositeKey.AddKey(command.String())
 		// If the command uses files from the context, add them.
+
+		// COPYとADDのときだけ帰ってくるやつ
 		files, err := command.FilesUsedFromContext(&cfg, s.args)
 		if err != nil {
 			return err
 		}
+		// 転送するファイル群のcacheを計算する
 		for _, f := range files {
 			if err := compositeKey.AddPath(f); err != nil {
 				return err
 			}
 		}
 
-		ck, err := compositeKey.Hash()
-		if err != nil {
-			return err
-		}
+		// 基本的にRUNのみ
 		if command.ShouldCacheOutput() {
+			// そのコマンドの時点でのハッシュを計算する
+			ck, err := compositeKey.Hash()
+			if err != nil {
+				return err
+			}
 			img, err := layerCache.RetrieveLayer(ck)
 			if err != nil {
 				logrus.Debugf("Failed to retrieve layer: %s", err)
@@ -172,6 +186,7 @@ func (s *stageBuilder) optimize(compositeKey CompositeCache, cfg v1.Config) erro
 				break
 			}
 
+			// CacheCommandに内容をすげ替える
 			if cacheCmd := command.CacheCommand(img); cacheCmd != nil {
 				logrus.Infof("Using caching version of cmd: %s", command.String())
 				s.cmds[i] = cacheCmd
@@ -193,6 +208,7 @@ func (s *stageBuilder) build() error {
 	compositeKey := NewCompositeCache(s.baseImageDigest)
 
 	// Apply optimizations to the instructions.
+	// COPYとADDの転送対象群からcache可能なRUNを求めてRUNの中身をファイルコピーに置き換える
 	if err := s.optimize(*compositeKey, s.cf.Config); err != nil {
 		return err
 	}
@@ -200,18 +216,21 @@ func (s *stageBuilder) build() error {
 	// Unpack file system to root if we need to.
 	shouldUnpack := false
 	for _, cmd := range s.cmds {
+		// RUNかどうか
 		if cmd.RequiresUnpackedFS() {
 			logrus.Infof("Unpacking rootfs as cmd %s requires it.", cmd.String())
 			shouldUnpack = true
 			break
 		}
 	}
+	// 他のステージからファイルが参照されている場合
 	if len(s.crossStageDeps[s.stage.Index]) > 0 {
 		shouldUnpack = true
 	}
 
 	if shouldUnpack {
 		t := timing.Start("FS Unpacking")
+		// / 以下にイメージの内容を展開
 		if _, err := util.GetFSFromImage(constants.RootDir, s.image); err != nil {
 			return err
 		}
@@ -224,6 +243,7 @@ func (s *stageBuilder) build() error {
 	}
 	// Take initial snapshot
 	t := timing.Start("Initial FS snapshot")
+	// / からFullScanしてlayeredMapを作っていく
 	if err := s.snapshotter.Init(); err != nil {
 		return err
 	}
@@ -239,6 +259,7 @@ func (s *stageBuilder) build() error {
 		compositeKey.AddKey(command.String())
 		t := timing.Start("Command: " + command.String())
 		// If the command uses files from the context, add them.
+		// COPY, ADD の引数からContextから使うファイルの一覧を返す
 		files, err := command.FilesUsedFromContext(&s.cf.Config, s.args)
 		if err != nil {
 			return err
@@ -249,13 +270,15 @@ func (s *stageBuilder) build() error {
 			}
 		}
 		logrus.Info(command.String())
-
 		if err := command.ExecuteCommand(&s.cf.Config, s.args); err != nil {
 			return err
 		}
+		// ExecuteCommandで作ったファイルの差分を返す
 		files = command.FilesToSnapshot()
 		timing.DefaultRun.Stop(t)
 
+		// filesはnilと[]string{}を区別する
+		// cache optionがあればsnapshotする
 		if !s.shouldTakeSnapshot(index, files) {
 			continue
 		}
@@ -265,16 +288,19 @@ func (s *stageBuilder) build() error {
 			return err
 		}
 
-		ck, err := compositeKey.Hash()
-		if err != nil {
-			return err
-		}
+
 		// Push layer to cache (in parallel) now along with new config file
+		// RUN且つでCacheが有効な場合, Pushする
 		if s.opts.Cache && command.ShouldCacheOutput() {
+			ck, err := compositeKey.Hash()
+			if err != nil {
+				return err
+			}
 			cacheGroup.Go(func() error {
 				return pushLayerToCache(s.opts, ck, tarPath, command.String())
 			})
 		}
+		// tarファイルからlayerをimageに追加する
 		if err := s.saveSnapshotToImage(command.String(), tarPath); err != nil {
 			return err
 		}
@@ -285,21 +311,27 @@ func (s *stageBuilder) build() error {
 	return nil
 }
 
+// filesはnilと[]string{}を区別する. filesがnilの場合はすべてをsnapshotする
+// cache optionがあればsnapshotする
 func (s *stageBuilder) takeSnapshot(files []string) (string, error) {
 	var snapshot string
 	var err error
 	t := timing.Start("Snapshotting FS")
 	if files == nil || s.opts.SingleSnapshot {
+		// full scan して layeredMap との差分をtarに書く
 		snapshot, err = s.snapshotter.TakeSnapshotFS()
 	} else {
 		// Volumes are very weird. They get snapshotted in the next command.
 		files = append(files, util.Volumes()...)
+		// filesだけを layeredMap に追加しtarに書く
 		snapshot, err = s.snapshotter.TakeSnapshot(files)
 	}
 	timing.DefaultRun.Stop(t)
 	return snapshot, err
 }
 
+// filesはnilと[]string{}を区別する
+// cache optionがあればsnapshotする
 func (s *stageBuilder) shouldTakeSnapshot(index int, files []string) bool {
 	isLastCommand := index == len(s.stage.Commands)-1
 
@@ -356,6 +388,7 @@ func (s *stageBuilder) saveSnapshotToImage(createdBy string, tarPath string) err
 
 }
 
+// ステージごとにCOPY --fromで依存している外部イメージの中のファイル名を解決する
 func CalculateDependencies(opts *config.KanikoOptions) (map[int][]string, error) {
 	stages, err := dockerfile.Stages(opts)
 	if err != nil {
@@ -426,14 +459,16 @@ func DoBuild(opts *config.KanikoOptions) (v1.Image, error) {
 	if err != nil {
 		return nil, err
 	}
+	// グローバル変数に.dockerignoreを読み込む
 	if err := util.GetExcludedFiles(opts.SrcContext); err != nil {
 		return nil, err
 	}
-	// Some stages may refer to other random images, not previous stages
+	// COPY --fromで外部イメージに依存している場合イメージをdownload, 展開
 	if err := fetchExtraStages(stages, opts); err != nil {
 		return nil, err
 	}
 
+	// ステージごとにCOPY --fromで依存している外部イメージの中のファイル名を解決する
 	crossStageDependencies, err := CalculateDependencies(opts)
 	if err != nil {
 		return nil, err
@@ -459,6 +494,8 @@ func DoBuild(opts *config.KanikoOptions) (v1.Image, error) {
 				return nil, err
 			}
 			if opts.Reproducible {
+				// 再現性のためにマシン固有の情報をconfig fileから削ぎ落とす
+				// createdAtもepoch(0)になる
 				sourceImage, err = mutate.Canonical(sourceImage)
 				if err != nil {
 					return nil, err
@@ -472,12 +509,15 @@ func DoBuild(opts *config.KanikoOptions) (v1.Image, error) {
 			timing.DefaultRun.Stop(t)
 			return sourceImage, nil
 		}
+		// 他のステージから参照されている場合はtrue
 		if stage.SaveStage {
+			// ステージをtarで保存
 			if err := saveStageAsTarball(strconv.Itoa(index), sourceImage); err != nil {
 				return nil, err
 			}
 		}
 
+		// 後ろのステージから参照されるfileを保存しておく
 		filesToSave, err := filesToSave(crossStageDependencies[index])
 		if err != nil {
 			return nil, err
@@ -491,6 +531,7 @@ func DoBuild(opts *config.KanikoOptions) (v1.Image, error) {
 			copy.Copy(p, filepath.Join(dstDir, p))
 		}
 
+		// 内部状態以外のファイルを削除する
 		// Delete the filesystem
 		if err := util.DeleteFilesystem(); err != nil {
 			return nil, err
@@ -609,7 +650,7 @@ func resolveOnBuild(stage *config.KanikoStage, config *v1.Config) error {
 	stage.Commands = append(cmds, stage.Commands...)
 	logrus.Infof("Executing %v build triggers", len(cmds))
 
-	// Blank out the Onbuild command list for this image
+	// Blank out the OnBuild command list for this image
 	config.OnBuild = nil
 	return nil
 }

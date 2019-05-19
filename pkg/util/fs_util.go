@@ -265,6 +265,8 @@ func extractFile(dest string, hdr *tar.Header, tr io.Reader) error {
 	return nil
 }
 
+// /proc/self/mountinfoとVOLUMEコマンドで指定されたパス以下にないか確認する
+// /kaniko, /var/run, /etc/mtab 以下もダメ
 func IsInWhitelist(path string) bool {
 	for _, wl := range whitelist {
 		if !wl.PrefixMatchOnly && path == wl.Path {
